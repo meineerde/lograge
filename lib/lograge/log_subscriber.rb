@@ -1,5 +1,11 @@
 require 'active_support/core_ext/class/attribute'
-require 'active_support/log_subscriber'
+require 'action_pack/version'
+if ::ActionPack::VERSION::MAJOR >= 3
+  require 'active_support/log_subscriber'
+else
+  # This mocks the LogSubscriber class for Rails 2
+  require 'lograge/rails_ext/active_support/log_subscriber'
+end
 
 module Lograge
   class RequestLogSubscriber < ActiveSupport::LogSubscriber

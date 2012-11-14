@@ -55,15 +55,47 @@ module Lograge
   end
 
   def self.setup(app)
-    app.config.action_dispatch.rack_cache[:verbose] = false if app.config.action_dispatch.rack_cache
-    require 'lograge/rails_ext/rack/logger'
-    Lograge.remove_existing_log_subscriptions
-    Lograge::RequestLogSubscriber.attach_to :action_controller
-    Lograge.custom_options = app.config.lograge.custom_options
-    Lograge.log_format = app.config.lograge.log_format || :lograge
+    if ::ActionPack::VERSION::MAJOR >= 3
+      app.config.action_dispatch.rack_cache[:verbose] = false if app.config.action_dispatch.rack_cache
+      require 'lograge/rails_ext/rack/logger'
+      Lograge.remove_existing_log_subscriptions
+      Lograge::RequestLogSubscriber.attach_to :action_controller
+      Lograge.custom_options = app.config.lograge.custom_options
+      Lograge.log_format = app.config.lograge.log_format || :lograge
+    else
+      require 'lograge/rails_ext/action_controller/lograge'
+      require 'action_controller/base'
+      ActionController::Base.class_eval do
+        include ActionController::Lograge
+      end
+
+      Lograge.custom_options = Rails.configuration.lograge.custom_options
+      Lograge.log_format = Rails.configuration.lograge.log_format || :lograge
+
+      # force the logger to be only set on the mocked LogSubscriber
+      ActiveSupport::LogSubscriber.logger = ActionController::Base.logger
+
+      # Nobody else should spew their logs
+      Object.send(:remove_const, :RAILS_DEFAULT_LOGGER) if Object.const_defined?(:RAILS_DEFAULT_LOGGER)
+      Object.const_set(:RAILS_DEFAULT_LOGGER, nil)
+
+      ActionController::Base.logger = nil
+      ActiveSupport::Cache::Store.logger = nil
+      # ActiveRecord::Base.logger = nil if defined?(ActiveRecord)
+      ActiveResource::Base.logger = nil if defined?(ActiveResource)
+
+      if ActiveSupport::LogSubscriber.logger && ActiveSupport::LogSubscriber.logger.respond_to?(:flush)
+        ActionController::Dispatcher.after_dispatch do
+          ActiveSupport::LogSubscriber.logger.flush
+        end
+      end
+    end
+
     case Lograge.log_format.to_s
     when "logstash"
       begin
+        # MRI 1.8 doesn't set the RUBY_ENGINE constant required by logstash
+        Object.const_set(:RUBY_ENGINE, "ruby") unless Object.const_defined?(:RUBY_ENGINE)
         require "logstash-event"
       rescue LoadError
         puts "You need to install the logstash-event gem to use the logstash output."
@@ -73,4 +105,21 @@ module Lograge
   end
 end
 
-require 'lograge/railtie' if defined?(Rails)
+if defined?(Rails)
+  if Rails::VERSION::MAJOR >= 3
+    require 'lograge/railtie'
+  else
+    # In Rails 2.x, Lograge must be setup by hand in an initializer
+    # Thus can be done similar to:
+    #
+    #  require 'lograge'
+    #  Rails.configuration.lograge.log_format = :logstash
+    #  Lograge.setup(nil)
+
+    Rails::Configuration.class_eval do
+      def lograge
+        @lograge ||= Rails::OrderedOptions.new
+      end
+    end
+  end
+end
